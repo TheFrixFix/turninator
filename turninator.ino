@@ -178,11 +178,11 @@ void setup() {
 
   ledcAttach(IN1_A, PWM_FREQ, PWM_BITS);
   ledcAttach(IN2_A, PWM_FREQ, PWM_BITS);
-  ledcWrite(IN1_A, 0);
-  ledcWrite(IN2_A, 0);
+  ledcWrite(IN1_A, PWM_MAX);
+  ledcWrite(IN2_A, PWM_MAX);
   
-  pinMode(EN_A, OUTPUT);
-  digitalWrite(EN_A, 0);
+  // pinMode(EN_A, OUTPUT);
+  // digitalWrite(EN_A, 0);
 
   // accel_test();
   // delay(200);
@@ -256,11 +256,11 @@ void loop() {
 
   a.error = calcPosError(a.pos_set, a.pos_curr);
 
-  if (!a.motorOff) {
-    digitalWrite(EN_A, 0);  
-    digitalWrite(EN_A, 1);
-    digitalWrite(EN_A, 0);  // Super jank way to maybe deal with H bridge cutting out?
-  }
+  // if (!a.motorOff) {
+  //   digitalWrite(EN_A, 0);  
+  //   digitalWrite(EN_A, 1);
+  //   digitalWrite(EN_A, 0);  // Super jank way to maybe deal with H bridge cutting out?
+  // }
 
   // Pid output calculation ----------------------------------
 
@@ -287,11 +287,13 @@ void loop() {
     //a.xd = -a.kd*1000*(a.prevPos - a.currAngle)/tElapsed;   // Derivative (of input hence neg required but no derivative kick)
     // a.xd = a.kd*gyroZ/10000;   // instead of derivative -> use gyro output!
 
-    a.set = (a.kp*a.error + a.xi + a.xd);
+    // a.set = (a.kp*a.error + a.xi + a.xd);
     limit_pwm(&a.set, MAX_PWM_VAL_A);
   }
   a.prevPos = a.pos_curr;
   a.prevError = a.error;
+
+
 
   //------------------------------------------------------------
   moveMotor(&a, EN_A, IN1_A, IN2_A, MIN_PWM_VAL_A);
@@ -467,8 +469,8 @@ void processCommand() {
   }
   else if(strcmp(cmd, "set") == 0) {           // Set position (encoder values)
     Serial.println((int)cmdVal);
-    setPosTarget((int)cmdVal, &a);
-    // a.set = (int)cmdVal;  
+    // setPosTarget((int)cmdVal, &a);
+    a.set = (int)cmdVal;  
   }
   else if( (strcmp(cmd, "speed") == 0) || (strcmp(cmd, "spd") == 0)) {           // Set max speed a (rad/sec)
     setMaxSpeed(cmdVal, &a);
@@ -501,30 +503,30 @@ void processCommand() {
 
 void moveMotor(AxisParams *axis, uint8_t en, uint8_t in1, uint8_t in2, int16_t minPWM) {
   if (axis->stopped) {
-    digitalWrite(en, 1);    //Disables motor
-    ledcWrite(in1, 0);
-    ledcWrite(in2, 0);
+    // digitalWrite(en, 1);    //Disables motor
+    ledcWrite(in1, PWM_MAX);
+    ledcWrite(in2, PWM_MAX);
     return;
   }
   if ( ((int)axis->set == 0) || ( (-minPWM < axis->set) && (axis->set < minPWM) )) {
     // Set motor speed to 0 because it is in the control dead zone
-    ledcWrite(in1, 0);
-    ledcWrite(in2, 0);
-    digitalWrite(en, 1);
+    ledcWrite(in1, PWM_MAX);
+    ledcWrite(in2, PWM_MAX);
+    // digitalWrite(en, 1);
     axis->motorOff = true;
     return;
   }
   if ( axis->set < 0 ) {
-    ledcWrite(in1, (uint16_t)abs(axis->set));
+    ledcWrite(in1, PWM_MAX - (uint16_t)abs(axis->set));
     ledcWrite(in2, 0);
-    digitalWrite(en, 0);
+    // digitalWrite(en, 0);
     axis->motorOff = false;
     return;
   }
   if ( axis->set > 0 ) {
     ledcWrite(in1, 0);
-    ledcWrite(in2, (uint16_t)abs(axis->set));
-    digitalWrite(en, 0);
+    ledcWrite(in2, PWM_MAX - (uint16_t)abs(axis->set));
+    // digitalWrite(en, 0);
     axis->motorOff = false;
     return;
   }
