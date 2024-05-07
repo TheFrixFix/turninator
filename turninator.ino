@@ -11,7 +11,6 @@
 #include "esp_timer.h"    // better alternative to micros()
 
 Preferences preferences;
-
 Adafruit_LSM6DS3TRC lsm6ds3trc;
 
 
@@ -21,14 +20,13 @@ Adafruit_LSM6DS3TRC lsm6ds3trc;
 // uC definitions: 
 
 
-#define EN_A    19  // Red wire - Active Low Enable
+// #define EN_A    17  // Red wire - Active Low Enable
 #define IN1_A   18  // Grey wire 
-#define IN2_A   17  // White wire 
+#define IN2_A   19  // White wire 
 #define ENC1_A  34  // White wire
 #define ENC2_A  35  // Blue wire
 
 #define ENC_DEBOUNCE 100 //micro seconds
-
 
 #define KEY_MAX_ACCEL  "max_accel_"
 #define KEY_MAX_SPEED  "max_speed_"
@@ -40,12 +38,12 @@ Adafruit_LSM6DS3TRC lsm6ds3trc;
 
 
 #define PWM_FREQ 30000
-#define PWM_BITS  8
+#define PWM_BITS  10
 #define PWM_MAX   ((1<<PWM_BITS) -1)
 
-#define MIN_PWM_VAL_A 1  //60 is reasonable instantaneous start value for 18.4V supply
-#define MAX_PWM_VAL_A 180 // actual max is 255 - motor at 30v is too powerful   Depending how timers are setup, the max "PWM" value might change
-#define MAX_INTEGRAL_A 170.0 // A Basically limits the acceleration sorta?
+#define MIN_PWM_VAL_A 500  //60 is reasonable instantaneous start value for 18.4V supply
+#define MAX_PWM_VAL_A PWM_MAX //180 // actual max is 255 - motor at 30v is too powerful   Depending how timers are setup, the max "PWM" value might change
+#define MAX_INTEGRAL_A 800 // A Basically limits the acceleration sorta?
 
 #define ANGLE_LIM_CW    -10   // DEGREES as input by user.  Measured how the code sees it
 #define ANGLE_LIM_CCW   179   // DEGREES as input by user.  If i go above 180 in this direction, it will roll over and make life more complicated
@@ -77,7 +75,6 @@ struct AxisParams {
   float maxAccel;      // rads / sec^2
   float maxSpeed;     // rads / sec ?
 
-
   float prevPos = 0;   // for derivative calc (encoder pos)
   float prevError = 0;    // For a different derivative calc (encoder pos)
   
@@ -88,7 +85,6 @@ struct AxisParams {
   float deadzone = 0;
   Trajectory *trajectory;
 };
-
 
 
 ////////////// Serial vars
@@ -172,17 +168,15 @@ void setup() {
 
   // Encoder Interrupt
   pinMode(ENC1_A, INPUT);
-  pinMode(ENC2_A, INPUT_PULLDOWN);
+  pinMode(ENC2_A, INPUT);
   attachInterrupt(ENC2_A, readEncoder_a, RISING);
 
 
   ledcAttach(IN1_A, PWM_FREQ, PWM_BITS);
   ledcAttach(IN2_A, PWM_FREQ, PWM_BITS);
-  ledcWrite(IN1_A, PWM_MAX);
-  ledcWrite(IN2_A, PWM_MAX);
+  ledcWrite(IN1_A, 0);
+  ledcWrite(IN2_A, 0);
   
-  // pinMode(EN_A, OUTPUT);
-  // digitalWrite(EN_A, 0);
 
   // accel_test();
   // delay(200);
@@ -296,7 +290,7 @@ void loop() {
 
 
   //------------------------------------------------------------
-  moveMotor(&a, EN_A, IN1_A, IN2_A, MIN_PWM_VAL_A);
+  moveMotor(&a, 0, IN1_A, IN2_A, MIN_PWM_VAL_A);
   // if (a.set > 0) {
   //   digitalWrite(EN_A, 0);
   //   ledcWrite(IN1_A, a.set);
@@ -322,19 +316,31 @@ void loop() {
     
     Serial.print("Curr: "); Serial.print(tempCurrPos);
     Serial.print("\tSet: "); Serial.print(a.pos_set);
-    Serial.print("\tError: "); Serial.print(a.error);
+    // Serial.print("\tError: "); Serial.print(a.error);
     Serial.print("\tMotSpd:"); Serial.print(a.set);
-    Serial.print("\txi: "); Serial.print(a.xi);
-    Serial.print("\tkp: "); Serial.print(a.kp);
-    Serial.print("\tki: "); Serial.print(a.ki);
-    Serial.print("\tkd: "); Serial.print(a.kd);
+    Serial.print("\tledcWrite:"); Serial.print((int)abs(a.set));
+    Serial.print("\tledcWrite:"); 
+    if(a.set < 0) {
+      Serial.print("REVERSE");
+    }
+    else if (a.set > 0) {
+      Serial.print("FORWARD");
+    }
+    else {
+      Serial.print("STOP");
+    }
+    Serial.println();
+    
+    // Serial.print("\txi: "); Serial.print(a.xi);
+    // Serial.print("\tkp: "); Serial.print(a.kp);
+    // Serial.print("\tki: "); Serial.print(a.ki);
+    // Serial.print("\tkd: "); Serial.print(a.kd);
     // Serial.print("\tLastTime (ms): "); Serial.print(millis()-encoderLastTime);
-    Serial.print("\tPWM_MAX: "); Serial.print(PWM_MAX);
-    Serial.print("\tprintTime: "); Serial.println(currMillis-lastPrint);
+    // Serial.print("\tPWM_MAX: "); Serial.print(PWM_MAX);
+    // Serial.print("\tprintTime: "); Serial.println(currMillis-lastPrint);
     lastPrint = millis();
   }
 }
-
 
 
 
@@ -503,30 +509,29 @@ void processCommand() {
 
 void moveMotor(AxisParams *axis, uint8_t en, uint8_t in1, uint8_t in2, int16_t minPWM) {
   if (axis->stopped) {
-    // digitalWrite(en, 1);    //Disables motor
-    ledcWrite(in1, PWM_MAX);
-    ledcWrite(in2, PWM_MAX);
+    ledcWrite(in1, 0);
+    ledcWrite(in2, 0);
+    axis->motorOff = true;
     return;
   }
-  if ( ((int)axis->set == 0) || ( (-minPWM < axis->set) && (axis->set < minPWM) )) {
+  if ( ((int)axis->set == 0) ) { //} || ( (-minPWM < axis->set) && (axis->set < minPWM) )) {
     // Set motor speed to 0 because it is in the control dead zone
-    ledcWrite(in1, PWM_MAX);
-    ledcWrite(in2, PWM_MAX);
-    // digitalWrite(en, 1);
+    ledcWrite(in1, 0);
+    ledcWrite(in2, 0);
     axis->motorOff = true;
     return;
   }
   if ( axis->set < 0 ) {
-    ledcWrite(in1, PWM_MAX - (uint16_t)abs(axis->set));
+    int y = map((int)abs(axis->set), 0, PWM_MAX, minPWM, PWM_MAX);
     ledcWrite(in2, 0);
-    // digitalWrite(en, 0);
+    ledcWrite(in1, y);
     axis->motorOff = false;
     return;
   }
   if ( axis->set > 0 ) {
+    int y = map((int)abs(axis->set), 0, PWM_MAX, minPWM, PWM_MAX);
     ledcWrite(in1, 0);
-    ledcWrite(in2, PWM_MAX - (uint16_t)abs(axis->set));
-    // digitalWrite(en, 0);
+    ledcWrite(in2, y);
     axis->motorOff = false;
     return;
   }
