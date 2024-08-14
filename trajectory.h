@@ -195,7 +195,7 @@ void Trajectory::setTargetVel(float _targetVel) {
 /**
  * Update controller and calculate new position value
  *
- * @param   (dT) The time change (ms) since function was last called
+ * @param   (dT) The time change (us) since function was last called
  * @return  The new current position of the system
  */
 float Trajectory::update(float dT) {

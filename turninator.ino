@@ -1,3 +1,4 @@
+#include <ESP32Encoder.h>
 
 // https://wired.chillibasket.com/2020/05/servo-trajectory/
 #include "trajectory.h"
@@ -13,12 +14,10 @@
 Preferences preferences;
 Adafruit_LSM6DS3TRC lsm6ds3trc;
 
-
 // Z-Axis = Standing Desk frame (up/down)
 // A-Axis = Rotation/Pivot motor (rotation)
 
 // uC definitions: 
-
 
 // #define EN_A    17  // Red wire - Active Low Enable
 #define IN1_A   18  // Grey wire 
@@ -36,20 +35,19 @@ Adafruit_LSM6DS3TRC lsm6ds3trc;
 #define KEY_DEADZONE   "deadzone_"
 #define KEY_I_DECAY    "i_decay_"
 
-
 #define PWM_FREQ 30000
 #define PWM_BITS  10
 #define PWM_MAX   ((1<<PWM_BITS) -1)
 
 #define MIN_PWM_VAL_A 500  //60 is reasonable instantaneous start value for 18.4V supply
 #define MAX_PWM_VAL_A PWM_MAX //180 // actual max is 255 - motor at 30v is too powerful   Depending how timers are setup, the max "PWM" value might change
-#define MAX_INTEGRAL_A 800 // A Basically limits the acceleration sorta?
+#define MAX_INTEGRAL_A 850 // A Basically limits the acceleration sorta?
 
 #define ANGLE_LIM_CW    -10   // DEGREES as input by user.  Measured how the code sees it
 #define ANGLE_LIM_CCW   179   // DEGREES as input by user.  If i go above 180 in this direction, it will roll over and make life more complicated
 
+#define PRINT_INTERVAL 500
 
-#define PRINT_INTERVAL 90
 unsigned long lastPrint = 0;
 float calcThreshold = 0.0001;         // used by trajectory library
 
@@ -95,6 +93,7 @@ char tempChars[numChars];        // temporary array for use when parsing
 // variables to hold the parsed data
 char cmd[numChars] = {0};
 float cmdVal = -10.0;
+bool cmdValGood = false;
 bool newData = false;
 #define DELIM " "
 
@@ -135,20 +134,21 @@ void prefs_init(float* defaultVal, const char* keyName, char* letter) {
 
 
 AxisParams a;
-Trajectory trajectory_a(calcThreshold);
+
+ESP32Encoder a_encoder;
 
 // Function called when interrupt on axis a encoder
-void readEncoder_a() {
-    int b = digitalRead(ENC1_A);
-    if (b>0) {
-      // a.pos_curr += 1;
-      tempCurrPos -= 1;
-    }
-    else {
-      // a.pos_curr -= 1;
-      tempCurrPos += 1;
-    }
-}
+// void readEncoder_a() {
+//     int b = digitalRead(ENC1_A);
+//     if (b>0) {
+//       a.pos_curr += 1;
+//       // tempCurrPos -= 1;
+//     }
+//     else {
+//       a.pos_curr -= 1;
+//       // tempCurrPos += 1;
+//     }
+// }
 
 unsigned long currMillis;
 
@@ -158,54 +158,45 @@ void setup() {
   
   // Defaults for axis A
   a.letter = 'a';
-  a.kp = 0;
+  a.kp = 1;
   a.ki = 0;
   a.kd = 0;
   a.maxAccel = .02;
   a.maxSpeed = .2;
   a.deadzone = 0.8*DEG_TO_RAD;
-  a.trajectory = &trajectory_a;
 
   // Encoder Interrupt
   pinMode(ENC1_A, INPUT);
   pinMode(ENC2_A, INPUT);
-  attachInterrupt(ENC2_A, readEncoder_a, RISING);
-
+  a_encoder.attachFullQuad(ENC1_A, ENC2_A);
+  // attachInterrupt(ENC2_A, readEncoder_a, RISING);
 
   ledcAttach(IN1_A, PWM_FREQ, PWM_BITS);
   ledcAttach(IN2_A, PWM_FREQ, PWM_BITS);
   ledcWrite(IN1_A, 0);
   ledcWrite(IN2_A, 0);
   
-
   // accel_test();
   // delay(200);
-
-  preferences.begin("tv-stand", false);
 
   // lsm6ds3trc.readAcceleration(accX, accY, accZ);
   // setAngle = calculateAngle(accX, accY);  //Makes sure the system setpoint starts where it currently is, that way we can enforce acceleration control
   // lsm6ds3trc.readGyroscope(gyroX, gyroY, gyroZ);
-
-  // a.trajectory->setTargetPos(0);
-  // a.trajectory->setPos(0);
   
-
+  preferences.begin("tv-stand", false);
   prefs_init(&a.maxAccel, KEY_MAX_ACCEL, &a.letter);
-  a.trajectory->setAcc(a.maxAccel);
-  a.trajectory->setDec(a.maxAccel);
-
   prefs_init(&a.maxSpeed, KEY_MAX_SPEED, &a.letter); // max speed axis a (rad/sec)
-  a.trajectory->setMaxVel(a.maxSpeed);
-
   prefs_init(&a.kp, KEY_KP, &a.letter);
   prefs_init(&a.ki, KEY_KI, &a.letter);
   prefs_init(&a.kd, KEY_KD, &a.letter);     // kd axis a
   prefs_init(&a.deadzone, KEY_DEADZONE, &a.letter);     // deadzone axis a
   prefs_init(&a.iDecay, KEY_I_DECAY, &a.letter);
-  a.xi = 0;
 
+  a.trajectory = new Trajectory(a.maxSpeed, a.maxAccel, a.maxAccel, calcThreshold);
+
+  a.xi = 0;
 }
+
 
 void loop() {
 
@@ -217,7 +208,10 @@ void loop() {
 
     Serial.print("ECHO: ");
     Serial.print(cmd);
-    Serial.print("\tVAL: "); Serial.print(cmdVal,1);
+    if(cmdValGood) {
+      Serial.print("\tVAL: "); 
+      Serial.print(cmdVal,1);
+    }
     Serial.println();
 
     processCommand();
@@ -225,7 +219,6 @@ void loop() {
     newData = false;
   }
   
-
   // Should be more accurate, now that the code actually waits for a new acceleration
   // That way the timings are stable and actually apply to the time period - no sense in having the PID run faster than the accel?
   // Time =~ 19500 = 52HZ data rate from accel
@@ -240,21 +233,14 @@ void loop() {
   }
   tElapsed = (time2 - time1);
   time1 = micros();
-  
-  // Acceleration, decel, max velocity
-  // a.pos_set = a.trajectory->update(tElapsed);
+
+  a.pos_set = a.trajectory->update(tElapsed);
+  a.pos_curr = a_encoder.getCount();
 
   // Reference angle on bootup, will use later
   // currAngle = calculateAngle(accX, accY);
 
-
   a.error = calcPosError(a.pos_set, a.pos_curr);
-
-  // if (!a.motorOff) {
-  //   digitalWrite(EN_A, 0);  
-  //   digitalWrite(EN_A, 1);
-  //   digitalWrite(EN_A, 0);  // Super jank way to maybe deal with H bridge cutting out?
-  // }
 
   // Pid output calculation ----------------------------------
 
@@ -281,13 +267,11 @@ void loop() {
     //a.xd = -a.kd*1000*(a.prevPos - a.currAngle)/tElapsed;   // Derivative (of input hence neg required but no derivative kick)
     // a.xd = a.kd*gyroZ/10000;   // instead of derivative -> use gyro output!
 
-    // a.set = (a.kp*a.error + a.xi + a.xd);
+    a.set = (a.kp*a.error + a.xi + a.xd);
     limit_pwm(&a.set, MAX_PWM_VAL_A);
   }
   a.prevPos = a.pos_curr;
   a.prevError = a.error;
-
-
 
   //------------------------------------------------------------
   moveMotor(&a, 0, IN1_A, IN2_A, MIN_PWM_VAL_A);
@@ -314,11 +298,11 @@ void loop() {
   currMillis = millis();
   if (currMillis >= lastPrint + PRINT_INTERVAL) {
     
-    Serial.print("Curr: "); Serial.print(tempCurrPos);
+    Serial.print("Curr: "); Serial.print(a.pos_curr);
     Serial.print("\tSet: "); Serial.print(a.pos_set);
-    // Serial.print("\tError: "); Serial.print(a.error);
+    Serial.print("\tError: "); Serial.print(a.error);
     Serial.print("\tMotSpd:"); Serial.print(a.set);
-    Serial.print("\tledcWrite:"); Serial.print((int)abs(a.set));
+    // Serial.print("\tledcWrite:"); Serial.print((int)abs(a.set));
     Serial.print("\tledcWrite:"); 
     if(a.set < 0) {
       Serial.print("REVERSE");
@@ -329,12 +313,12 @@ void loop() {
     else {
       Serial.print("STOP");
     }
+    Serial.print("\tkp: "); Serial.print(a.kp);
+    Serial.print("\tki: "); Serial.print(a.ki);
+    Serial.print("\txi: "); Serial.print(a.xi);
+    Serial.print("\tacc: "); Serial.print(a.maxAccel);
+    Serial.print("\tspd: "); Serial.print(a.maxSpeed);
     Serial.println();
-    
-    // Serial.print("\txi: "); Serial.print(a.xi);
-    // Serial.print("\tkp: "); Serial.print(a.kp);
-    // Serial.print("\tki: "); Serial.print(a.ki);
-    // Serial.print("\tkd: "); Serial.print(a.kd);
     // Serial.print("\tLastTime (ms): "); Serial.print(millis()-encoderLastTime);
     // Serial.print("\tPWM_MAX: "); Serial.print(PWM_MAX);
     // Serial.print("\tprintTime: "); Serial.println(currMillis-lastPrint);
@@ -343,22 +327,18 @@ void loop() {
 }
 
 
-
 float calcPosError(float set, float measured) {
   float error = set - measured;
   return error;
 }
 
 
-
 void setMaxSpeed(float input, AxisParams *axis) {
     // Check if it is within limits
     axis->maxSpeed = input;
-    
     char key[20];
     strcpy(key, KEY_MAX_SPEED);
     strcat(key, &axis->letter);
-    
     axis->trajectory->setMaxVel(axis->maxSpeed);
     preferences.putFloat(key,axis->maxSpeed);
     Serial.println(axis->trajectory->getMaxVel());
@@ -368,8 +348,9 @@ void setToCurrPos(AxisParams *axis) {
   axis->pos_set = axis->pos_curr;
   axis->error = 0;
   axis->prevError = 0;
-  axis->trajectory->setTargetPos(axis->pos_set);
   axis->trajectory->setPos(axis->pos_set);
+  axis->trajectory->setTargetPos(axis->pos_set);
+  Serial.print("SET TO CURRENT POS: ");
   Serial.println(a.pos_set);
 }
 
@@ -383,10 +364,10 @@ void getCurrAngle() {
     // Serial.println(a.setAngle*RAD_TO_DEG);
 }
 
-void setPosTarget(int input, AxisParams *axis) {
-  axis->pos_set = input;
-  Serial.println("SET POS");
-  Serial.println(currMillis-lastPrint);
+void setPosTarget(float input, AxisParams *axis) {
+  axis->trajectory->setTargetPos(input);
+  Serial.print("SET POS: ");
+  Serial.println(axis->trajectory->getTarget());
 }
 
 
@@ -463,46 +444,59 @@ void setKd(float input, AxisParams *axis) {
 
 // Looks at cmd[] and cmdVal
 void processCommand() {
-
-  if(strcmp(cmd, "kp") == 0) {           // Set kp
-    setKp(cmdVal, &a);
-  }
-  else if(strcmp(cmd, "ki") == 0) {           // Set ki
-    setKi(cmdVal, &a);
-  }
-  else if(strcmp(cmd, "kd") == 0) {           // Set kd
-    setKd(cmdVal, &a);
-  }
-  else if(strcmp(cmd, "set") == 0) {           // Set position (encoder values)
-    Serial.println((int)cmdVal);
-    // setPosTarget((int)cmdVal, &a);
-    a.set = (int)cmdVal;  
-  }
-  else if( (strcmp(cmd, "speed") == 0) || (strcmp(cmd, "spd") == 0)) {           // Set max speed a (rad/sec)
-    setMaxSpeed(cmdVal, &a);
-  }
-  else if( (strcmp(cmd, "accel") == 0) || (strcmp(cmd, "acc") == 0)) {           // Set max accel a (rad/sec^2)
-    setAccel(cmdVal, &a);
-  }
-  else if( (strcmp(cmd, "deadzone") == 0) || (strcmp(cmd, "dead") == 0)) {           // Set angle deadzone
-    setDeadzone(cmdVal, &a);
-  }
-  else if ( (strcmp(cmd, "decay") == 0) ) {
-    setDecay(cmdVal, &a);
-  }
-  else if(strcmp(cmd, "stop") == 0) {         // Stop
-    a.stopped = true;
-    Serial.println("------STOPPED-------");
-  }
-  else if(strcmp(cmd, "start") == 0) {        // Start
-    a.stopped = false;
-    Serial.println("=======    START    ========");
-  }
-  else if(strcmp(cmd, "curr") == 0) {        // Get current angle - sets to setpoint
-    setToCurrPos(&a);
+  if(cmdValGood) {
+    if(strcmp(cmd, "kp") == 0) {           // Set kp
+      setKp(cmdVal, &a);
+    }
+    else if(strcmp(cmd, "ki") == 0) {           // Set ki
+      setKi(cmdVal, &a);  
+    }
+    else if(strcmp(cmd, "kd") == 0) {           // Set kd
+      setKd(cmdVal, &a);
+    }
+    else if(strcmp(cmd, "set") == 0) {           // Set position (encoder values)
+      // Serial.println((float)cmdVal);
+      setPosTarget((float)cmdVal, &a); 
+    }
+    else if( (strcmp(cmd, "speed") == 0) || (strcmp(cmd, "spd") == 0)) {           // Set max speed a (rad/sec)
+      setMaxSpeed(cmdVal, &a);
+    }
+    else if( (strcmp(cmd, "accel") == 0) || (strcmp(cmd, "acc") == 0)) {           // Set max accel a (rad/sec^2)
+      setAccel(cmdVal, &a);
+    }
+    else if( (strcmp(cmd, "deadzone") == 0) || (strcmp(cmd, "dead") == 0)) {           // Set angle deadzone
+      setDeadzone(cmdVal, &a);
+    }
+    else if ( (strcmp(cmd, "decay") == 0) ) {
+      setDecay(cmdVal, &a);
+    }
+    else {
+      Serial.print("UNKNOWN COMMAND \"");
+      Serial.print(cmd);
+      Serial.print("\"\tValGood: true");
+      Serial.print("\tVal: ");
+      Serial.println(cmdVal);
+    }
   }
   else {
-    Serial.println("UNKNOWN COMMAND");
+    if(strcmp(cmd, "stop") == 0) {         // Stop
+      a.stopped = true;
+      Serial.println("-------  STOPPED  --------");
+    }
+    else if(strcmp(cmd, "start") == 0) {        // Start
+      a.stopped = false;
+      Serial.println("=======    START    ========");
+    }
+    else if(strcmp(cmd, "curr") == 0) {        // Get current angle - sets to setpoint
+      setToCurrPos(&a);
+    }
+    else {
+      Serial.print("UNKNOWN COMMAND \"");
+      Serial.print(cmd);
+      Serial.print("\"\tValGood: false");
+      Serial.print("\tVal: ");
+      Serial.println(cmdVal);
+    }
   }
 }
 
@@ -523,8 +517,8 @@ void moveMotor(AxisParams *axis, uint8_t en, uint8_t in1, uint8_t in2, int16_t m
   }
   if ( axis->set < 0 ) {
     int y = map((int)abs(axis->set), 0, PWM_MAX, minPWM, PWM_MAX);
-    ledcWrite(in2, 0);
     ledcWrite(in1, y);
+    ledcWrite(in2, 0);
     axis->motorOff = false;
     return;
   }
@@ -632,10 +626,12 @@ void parseCommand() {      // split the data into its parts
       strcpy(cmd, strtokIndx);                  // copy it to cmd
       strtokIndx = strtok(NULL, DELIM);         // this continues where the previous call left off
       if (strtokIndx == NULL) {
-        cmdVal = NAN;
+        cmdVal = -99987.65;
+        cmdValGood = false;
       }
       else {
         cmdVal = (float)atof(strtokIndx);
+        cmdValGood = true;
       }
     }
 }
